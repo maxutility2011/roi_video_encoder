@@ -6,11 +6,18 @@ frame before `libx264` encoding.
 
 ## Setup
 
-Requires Python 3 with `av`, `opencv-python`, and `inference` (Roboflow)
-installed, plus `cython` and `gcc` for the one-time native build.
+Requires Python 3, `gcc`, and `curl` (the last two only for the one-time
+native build below).
 
-Build the native extension (only needed once, or again after upgrading the
-`av` package):
+Install the Python dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Build the native extension (only needed once per machine, or again after
+upgrading the `av` package - `native/build.sh` downloads matching FFmpeg
+headers for whatever `av` version is installed, no `sudo` required):
 
 ```bash
 native/build.sh

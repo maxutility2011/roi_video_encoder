@@ -78,6 +78,99 @@ def get_boxes(frame, roi_words=DEFAULT_ROI_WORDS, confidence=DEFAULT_CONFIDENCE)
     return boxes
 
 
+# ---------------------------------------------------------------------------
+# Text detection: OpenCV's EAST detector, selected via the reserved --roi
+# word "text" (mixable with COCO classes, e.g. --roi person,text).
+# ---------------------------------------------------------------------------
+TEXT_ROI_WORD = "text"
+EAST_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "frozen_east_text_detection.pb")
+EAST_INPUT_SIZE = 320  # must be a multiple of 32; smaller = faster, less accurate on small text
+EAST_NMS_THRESHOLD = 0.4
+
+_east_net = None
+
+
+def _get_east_net():
+    global _east_net
+    if _east_net is None:
+        if not os.path.isfile(EAST_MODEL_PATH):
+            raise SystemExit(
+                f"EAST text detection model not found at {EAST_MODEL_PATH}. "
+                "Download it first with: models/download_east.sh"
+            )
+        _east_net = cv2.dnn.readNet(EAST_MODEL_PATH)
+    return _east_net
+
+
+def get_text_boxes(frame, confidence=DEFAULT_CONFIDENCE, nms_threshold=EAST_NMS_THRESHOLD):
+    """Detect text regions in one RGB frame using OpenCV's EAST detector.
+
+    Returns a list of (x, y, w, h) axis-aligned boxes, one per detected
+    text region. EAST natively predicts rotated boxes; we approximate each
+    as axis-aligned (ignoring the small rotation typical of on-screen text/
+    captions) since AVRegionOfInterest only supports axis-aligned rectangles
+    anyway - the same simplification used in most EAST tutorials.
+    """
+    net = _get_east_net()
+    fh, fw = frame.shape[:2]
+    scale_x = fw / EAST_INPUT_SIZE
+    scale_y = fh / EAST_INPUT_SIZE
+
+    bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    blob = cv2.dnn.blobFromImage(
+        bgr, 1.0, (EAST_INPUT_SIZE, EAST_INPUT_SIZE),
+        (123.68, 116.78, 103.94), swapRB=True, crop=False,
+    )
+    net.setInput(blob)
+    scores, geometry = net.forward([
+        "feature_fusion/Conv_7/Sigmoid",
+        "feature_fusion/concat_3",
+    ])
+
+    rects = []
+    confidences = []
+    num_rows, num_cols = scores.shape[2:4]
+    for row in range(num_rows):
+        scores_row = scores[0, 0, row]
+        x0, x1, x2, x3 = geometry[0, 0, row], geometry[0, 1, row], geometry[0, 2, row], geometry[0, 3, row]
+        angles_row = geometry[0, 4, row]
+        for col in range(num_cols):
+            if scores_row[col] < confidence:
+                continue
+            offset_x, offset_y = col * 4.0, row * 4.0
+            angle = angles_row[col]
+            cos_a, sin_a = np.cos(angle), np.sin(angle)
+            box_h = x0[col] + x2[col]
+            box_w = x1[col] + x3[col]
+            end_x = offset_x + cos_a * x1[col] + sin_a * x2[col]
+            end_y = offset_y - sin_a * x1[col] + cos_a * x2[col]
+            start_x = end_x - box_w
+            start_y = end_y - box_h
+            rects.append((start_x, start_y, box_w, box_h))
+            confidences.append(float(scores_row[col]))
+
+    if not rects:
+        return []
+
+    indices = cv2.dnn.NMSBoxes(rects, confidences, confidence, nms_threshold)
+    boxes = []
+    for i in np.array(indices).flatten():
+        x, y, w, h = rects[i]
+        x = int(round(x * scale_x))
+        y = int(round(y * scale_y))
+        w = int(round(w * scale_x))
+        h = int(round(h * scale_y))
+
+        # clamp to the frame - side data with an out-of-bounds region is rejected.
+        x = max(0, min(x, fw - 1))
+        y = max(0, min(y, fh - 1))
+        w = max(0, min(w, fw - x))
+        h = max(0, min(h, fh - y))
+        if w > 0 and h > 0:
+            boxes.append((x, y, w, h))
+    return boxes
+
+
 # ---- Alternative: real face ROI using OpenCV's bundled Haar cascade --------
 # Fully offline, no model download. Swap get_box -> get_box_face in the loop
 # below if the ROI you want is faces rather than whole people.
@@ -122,13 +215,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--roi", default=",".join(DEFAULT_ROI_WORDS),
         help=(
-            "Comma-separated COCO class name(s) to treat as the ROI, e.g. 'person' "
-            f"or 'person,dog,car'. Must be class(es) the {MODEL_ID} model knows - "
-            "it's a fixed-vocabulary COCO detector, not open-vocabulary. Every "
-            "matching detection in a frame is boosted simultaneously (e.g. "
-            "'person,car' boosts every detected person AND every detected car "
-            "in the same frame, each getting the same --qoffset), not just "
-            "the single largest match. (default: %(default)s)"
+            "Comma-separated ROI specifier(s), e.g. 'person' or 'person,dog,car'. "
+            f"Each must be either a COCO class the {MODEL_ID} model knows (it's a "
+            f"fixed-vocabulary COCO detector, not open-vocabulary), or the "
+            f"reserved word '{TEXT_ROI_WORD}' to also detect on-screen text via "
+            f"OpenCV's EAST detector, e.g. 'person,{TEXT_ROI_WORD}'. Every "
+            "matching detection in a frame is boosted simultaneously (not just "
+            "the single largest match), all sharing the same --qoffset. "
+            "(default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -163,14 +257,23 @@ def main():
     if not roi_words:
         raise SystemExit("--roi must name at least one COCO class")
 
+    coco_words = [w for w in roi_words if w.lower() != TEXT_ROI_WORD]
+    want_text = any(w.lower() == TEXT_ROI_WORD for w in roi_words)
+
     qoffset = Fraction(args.qoffset).limit_denominator(1000)
 
-    # Load the detector eagerly, with its own status line - on a first run this
-    # downloads model weights, which can take a while and would otherwise look
-    # exactly like a hang once the frame loop starts.
-    print(f"Loading ROI detector model: {MODEL_ID} ...", flush=True)
-    _get_model()
-    print("Model ready.", flush=True)
+    # Load whatever detector(s) --roi actually needs, eagerly and with their
+    # own status lines - on a first run the YOLO model download can take a
+    # while and would otherwise look exactly like a hang once the frame loop
+    # starts.
+    if coco_words:
+        print(f"Loading ROI detector model: {MODEL_ID} ...", flush=True)
+        _get_model()
+        print("Model ready.", flush=True)
+    if want_text:
+        print("Loading EAST text detector...", flush=True)
+        _get_east_net()
+        print("Text detector ready.", flush=True)
 
     in_container = av.open(args.video)
     in_stream = in_container.streams.video[0]
@@ -196,7 +299,11 @@ def main():
         # Detect on an RGB view of the frame - this doesn't touch frame.ptr,
         # so it's independent of whatever reformatting happens below.
         rgb = frame.to_ndarray(format="rgb24")
-        boxes = get_boxes(rgb, roi_words=roi_words, confidence=args.conf)
+        boxes = []
+        if coco_words:
+            boxes += get_boxes(rgb, roi_words=coco_words, confidence=args.conf)
+        if want_text:
+            boxes += get_text_boxes(rgb, confidence=args.conf)
 
         # Reformat to the encoder's pixel format BEFORE attaching ROI side
         # data: reformat() builds a new underlying AVFrame, and side data

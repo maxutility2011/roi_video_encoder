@@ -23,6 +23,13 @@ headers for whatever `av` version is installed, no `sudo` required):
 native/build.sh
 ```
 
+If you want text detection (`--roi text`, see below), download the EAST
+model once (~92MB, not checked into the repo):
+
+```bash
+models/download_east.sh
+```
+
 ## Run
 
 ```bash
@@ -31,11 +38,15 @@ python3 roi_encoder.py <input_video> -o <output_video> --roi person --conf 0.4 -
 
 - `<input_video>` - path to the input video file (required, positional).
 - `-o, --output` - path to write the output video (default: `output.mp4`).
-- `--roi` - comma-separated COCO class name(s) to treat as the ROI, e.g.
-  `person` or `person,dog,car` (default: `person`). Every matching detection
-  in a frame is boosted simultaneously - e.g. `person,car` boosts every
-  detected person AND every detected car in the same frame, each with the
-  same `--qoffset` - not just the single largest match.
+- `--roi` - comma-separated ROI specifier(s), e.g. `person` or
+  `person,dog,car` (default: `person`). Each must be either a COCO class the
+  detector model knows, or the reserved word `text` to also detect
+  on-screen text via OpenCV's EAST detector (requires
+  `models/download_east.sh` to have been run), e.g. `person,text`. Every
+  matching detection in a frame is boosted simultaneously - e.g.
+  `person,text` boosts every detected person AND every detected text region
+  in the same frame, each with the same `--qoffset` - not just the single
+  largest match.
 - `--conf` - detector confidence threshold (default: `0.4`).
 - `--crf` - libx264 Constant Rate Factor for the overall encode; lower is
   higher quality/bitrate (default: `43`).

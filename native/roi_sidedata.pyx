@@ -20,36 +20,54 @@ cimport libav as lib
 from av.video.frame cimport VideoFrame
 
 
-def attach_roi(VideoFrame frame, int top, int bottom, int left, int right,
-               int qnum, int qden):
-    """Attach one ROI region to `frame` with QP offset qnum/qden (AVRational).
+def attach_rois(VideoFrame frame, list regions, int qnum, int qden):
+    """Attach one or more ROI regions to `frame`, all sharing the same QP
+    offset qnum/qden (AVRational).
 
-    top/bottom/left/right are pixel coordinates, same convention as ffmpeg's
-    addroi filter (bottom/right are exclusive-ish per libavutil's own docs -
-    match whatever region you'd have passed to addroi's y+h / x+w).
+    `regions` is a list of (top, bottom, left, right) pixel-coordinate
+    tuples, one per detected object - same convention as ffmpeg's addroi
+    filter (bottom/right are exclusive-ish per libavutil's own docs, so pass
+    whatever you'd have passed to addroi's y+h / x+w). Multiple regions are
+    packed into a single side-data buffer as a real AVRegionOfInterest array
+    (self_size is the per-entry stride libavcodec uses to walk it) - this is
+    the same layout addroi itself would produce for overlapping/multiple
+    regions, just built directly instead of through the filter graph.
 
-    IMPORTANT: call this exactly once per frame, and call it BEFORE the
-    frame's .side_data is ever accessed (including just to inspect/log it) -
-    PyAV's _SideDataContainer builds and caches its view of the frame's side
-    data on first access, so touching it first would hide what we attach
-    here from any later Python-level read.
+    Call this at most once per frame, with ALL of that frame's regions in
+    one call - side data of a given type is meant to appear once per frame;
+    calling this twice on the same frame produces two separate
+    REGIONS_OF_INTEREST blocks, which downstream consumers don't expect.
+
+    IMPORTANT: call it BEFORE the frame's .side_data is ever accessed
+    (including just to inspect/log it) - PyAV's _SideDataContainer builds
+    and caches its view of the frame's side data on first access, so
+    touching it first would hide what we attach here from any later
+    Python-level read.
     """
     cdef lib.AVFrameSideData *sd
-    cdef lib.AVRegionOfInterest *roi
+    cdef lib.AVRegionOfInterest *roi_array
+    cdef size_t n = len(regions)
+    cdef size_t i
+    cdef int top, bottom, left, right
+
+    if n == 0:
+        return
 
     sd = lib.av_frame_new_side_data(
         frame.ptr,
         lib.AV_FRAME_DATA_REGIONS_OF_INTEREST,
-        sizeof(lib.AVRegionOfInterest),
+        n * sizeof(lib.AVRegionOfInterest),
     )
     if sd == NULL:
         raise MemoryError("av_frame_new_side_data failed")
 
-    roi = <lib.AVRegionOfInterest*> sd.data
-    roi.self_size = sizeof(lib.AVRegionOfInterest)
-    roi.top = top
-    roi.bottom = bottom
-    roi.left = left
-    roi.right = right
-    roi.qoffset.num = qnum
-    roi.qoffset.den = qden
+    roi_array = <lib.AVRegionOfInterest*> sd.data
+    for i in range(n):
+        top, bottom, left, right = regions[i]
+        roi_array[i].self_size = sizeof(lib.AVRegionOfInterest)
+        roi_array[i].top = top
+        roi_array[i].bottom = bottom
+        roi_array[i].left = left
+        roi_array[i].right = right
+        roi_array[i].qoffset.num = qnum
+        roi_array[i].qoffset.den = qden

@@ -32,7 +32,10 @@ python3 roi_encoder.py <input_video> -o <output_video> --roi person --conf 0.4 -
 - `<input_video>` - path to the input video file (required, positional).
 - `-o, --output` - path to write the output video (default: `output.mp4`).
 - `--roi` - comma-separated COCO class name(s) to treat as the ROI, e.g.
-  `person` or `person,dog,car` (default: `person`).
+  `person` or `person,dog,car` (default: `person`). Every matching detection
+  in a frame is boosted simultaneously - e.g. `person,car` boosts every
+  detected person AND every detected car in the same frame, each with the
+  same `--qoffset` - not just the single largest match.
 - `--conf` - detector confidence threshold (default: `0.4`).
 - `--crf` - libx264 Constant Rate Factor for the overall encode; lower is
   higher quality/bitrate (default: `43`).

@@ -18,7 +18,8 @@ except ImportError as e:
     )
 
 # ---------------------------------------------------------------------------
-# ROI detection (unchanged): YOLO on each decoded frame, largest box wins.
+# ROI detection: YOLO on each decoded frame, every matching detection becomes
+# its own ROI (all boosted together, sharing one --qoffset).
 # ---------------------------------------------------------------------------
 # yolo26n-640 is a closed-set COCO detector (80 fixed classes: "person", "dog",
 # "car", "cat", ... - see https://cocodataset.org/#explore for the full list),
@@ -40,18 +41,15 @@ def _get_model():
     return _model
 
 
-def get_box(frame, roi_words=DEFAULT_ROI_WORDS, confidence=DEFAULT_CONFIDENCE):
-    """Detect the ROI in one RGB frame and return its bounding box.
+def get_boxes(frame, roi_words=DEFAULT_ROI_WORDS, confidence=DEFAULT_CONFIDENCE):
+    """Detect all ROI instances in one RGB frame and return their boxes.
 
     roi_words is a list of COCO class names that count as the ROI, e.g.
     ["person"] or ["person", "dog"].
 
-    Returns (x, y, w, h) as integer pixels: (x, y) is the top-left corner,
-    (w, h) the size. Returns (0, 0, 0, 0) when nothing is detected - the
-    caller skips attaching ROI side data for that frame in that case.
-
-    If several targets are present, the largest box wins (usually the subject
-    closest to the camera).
+    Returns a list of (x, y, w, h) as integer pixels, one per detection:
+    (x, y) is the top-left corner, (w, h) the size. Returns an empty list
+    when nothing is detected.
     """
     # inference/OpenCV work in BGR; our frames are RGB.
     bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -60,23 +58,24 @@ def get_box(frame, roi_words=DEFAULT_ROI_WORDS, confidence=DEFAULT_CONFIDENCE):
         confidence=confidence,
         class_filter=roi_words,
     )[0]
-    if not result.predictions:
-        return 0, 0, 0, 0
 
-    # inference returns center-x/center-y plus width/height.
-    best = max(result.predictions, key=lambda p: p.width * p.height)
-    x = int(round(best.x - best.width / 2))
-    y = int(round(best.y - best.height / 2))
-    w = int(round(best.width))
-    h = int(round(best.height))
-
-    # clamp to the frame - side data with an out-of-bounds region is rejected.
     fh, fw = frame.shape[:2]
-    x = max(0, min(x, fw - 1))
-    y = max(0, min(y, fh - 1))
-    w = max(0, min(w, fw - x))
-    h = max(0, min(h, fh - y))
-    return x, y, w, h
+    boxes = []
+    for pred in result.predictions:
+        # inference returns center-x/center-y plus width/height.
+        x = int(round(pred.x - pred.width / 2))
+        y = int(round(pred.y - pred.height / 2))
+        w = int(round(pred.width))
+        h = int(round(pred.height))
+
+        # clamp to the frame - side data with an out-of-bounds region is rejected.
+        x = max(0, min(x, fw - 1))
+        y = max(0, min(y, fh - 1))
+        w = max(0, min(w, fw - x))
+        h = max(0, min(h, fh - y))
+        if w > 0 and h > 0:
+            boxes.append((x, y, w, h))
+    return boxes
 
 
 # ---- Alternative: real face ROI using OpenCV's bundled Haar cascade --------
@@ -125,8 +124,11 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated COCO class name(s) to treat as the ROI, e.g. 'person' "
             f"or 'person,dog,car'. Must be class(es) the {MODEL_ID} model knows - "
-            "it's a fixed-vocabulary COCO detector, not open-vocabulary. "
-            "(default: %(default)s)"
+            "it's a fixed-vocabulary COCO detector, not open-vocabulary. Every "
+            "matching detection in a frame is boosted simultaneously (e.g. "
+            "'person,car' boosts every detected person AND every detected car "
+            "in the same frame, each getting the same --qoffset), not just "
+            "the single largest match. (default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -194,7 +196,7 @@ def main():
         # Detect on an RGB view of the frame - this doesn't touch frame.ptr,
         # so it's independent of whatever reformatting happens below.
         rgb = frame.to_ndarray(format="rgb24")
-        x, y, w, h = get_box(rgb, roi_words=roi_words, confidence=args.conf)
+        boxes = get_boxes(rgb, roi_words=roi_words, confidence=args.conf)
 
         # Reformat to the encoder's pixel format BEFORE attaching ROI side
         # data: reformat() builds a new underlying AVFrame, and side data
@@ -202,13 +204,14 @@ def main():
         if frame.format.name != out_stream.pix_fmt:
             frame = frame.reformat(format=out_stream.pix_fmt)
 
-        if w > 0 and h > 0:
+        if boxes:
             # IMPORTANT: attach before anything ever reads frame.side_data -
             # PyAV's side-data view is built and cached on first access, so
             # a read beforehand (even just to log) would hide this from any
             # later Python-level check.
-            roi_sidedata.attach_roi(
-                frame, top=y, bottom=y + h, left=x, right=x + w,
+            regions = [(y, y + h, x, x + w) for x, y, w, h in boxes]
+            roi_sidedata.attach_rois(
+                frame, regions,
                 qnum=qoffset.numerator, qden=qoffset.denominator,
             )
 

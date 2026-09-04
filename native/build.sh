@@ -164,9 +164,10 @@ echo "== Smoke test =="
 (cd "$HERE" && "$PYTHON" -c "
 import roi_sidedata, av
 f = av.VideoFrame(width=16, height=16, format='yuv420p')
-roi_sidedata.attach_roi(f, top=0, bottom=16, left=0, right=16, qnum=-1, qden=2)
+roi_sidedata.attach_rois(f, [(0, 16, 0, 16), (0, 8, 0, 8)], qnum=-1, qden=2)
+assert len(f.side_data) == 1, 'expected one combined side-data block'
 sd = f.side_data[0]
-assert len(bytes(sd)) == 28, 'unexpected side-data size'
+assert len(bytes(sd)) == 56, 'unexpected side-data size for 2 regions'
 print('roi_sidedata.so OK:', f.side_data[0])
 ")
 

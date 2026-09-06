@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import time
 from fractions import Fraction
 
 import av
@@ -295,7 +296,26 @@ def main():
 
     print("Encoding with per-frame ROI applied...", flush=True)
     frame_idx = 0
-    for frame in in_container.decode(in_stream):
+
+    # Timing buckets, excluding model loading (already done above, before any
+    # of this runs). Decoding is timed around pulling each frame out of the
+    # container's own decode generator, so it doesn't include the detect/
+    # encode work done per iteration; detect and encode are timed around just
+    # the calls that do that work.
+    decode_time = 0.0
+    detect_time = 0.0
+    encode_time = 0.0
+
+    frame_iter = in_container.decode(in_stream)
+    while True:
+        t0 = time.perf_counter()
+        try:
+            frame = next(frame_iter)
+        except StopIteration:
+            break
+        decode_time += time.perf_counter() - t0
+
+        t0 = time.perf_counter()
         # Detect on an RGB view of the frame - this doesn't touch frame.ptr,
         # so it's independent of whatever reformatting happens below.
         rgb = frame.to_ndarray(format="rgb24")
@@ -304,7 +324,9 @@ def main():
             boxes += get_boxes(rgb, roi_words=coco_words, confidence=args.conf)
         if want_text:
             boxes += get_text_boxes(rgb, confidence=args.conf)
+        detect_time += time.perf_counter() - t0
 
+        t0 = time.perf_counter()
         # Reformat to the encoder's pixel format BEFORE attaching ROI side
         # data: reformat() builds a new underlying AVFrame, and side data
         # attached to the pre-reformat frame is not guaranteed to carry over.
@@ -324,6 +346,7 @@ def main():
 
         for packet in out_stream.encode(frame):
             out_container.mux(packet)
+        encode_time += time.perf_counter() - t0
 
         frame_idx += 1
         if total_frames > 0:
@@ -332,12 +355,31 @@ def main():
         else:
             print(f"\rFrame {frame_idx}", end="", flush=True)
 
+    t0 = time.perf_counter()
     for packet in out_stream.encode():  # flush the encoder
         out_container.mux(packet)
+    encode_time += time.perf_counter() - t0
 
     out_container.close()
     in_container.close()
+
+    total_time = decode_time + detect_time + encode_time
     print(f"\nDone: {frame_idx} frame(s) processed -> {args.output}")
+    print(
+        f"Timing (model loading excluded): "
+        f"decode {decode_time:.2f}s, detect {detect_time:.2f}s, "
+        f"encode {encode_time:.2f}s, total {total_time:.2f}s"
+        + (f" ({frame_idx / total_time:.1f} fps)" if total_time > 0 else "")
+    )
+
+    # Average bitrate of the muxed output file - actual output duration
+    # (frame_idx frames at the output stream's frame rate), not encode wall
+    # time, so this reflects the video's real bitrate, not encoding speed.
+    duration_sec = frame_idx / float(in_stream.average_rate)
+    if duration_sec > 0:
+        file_size_bits = os.path.getsize(args.output) * 8
+        bitrate_kbps = file_size_bits / duration_sec / 1000
+        print(f"Average bitrate: {bitrate_kbps:.1f} kbps ({duration_sec:.2f}s output)")
 
 
 if __name__ == "__main__":

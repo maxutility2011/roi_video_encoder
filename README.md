@@ -14,6 +14,7 @@ Install the Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+If your server does not have GPU installed, change "inference==1.3.8" to "inference-core==1.3.8" in requirements.txt.
 
 Build the native extension (only needed once per machine, or again after
 upgrading the `av` package - `native/build.sh` downloads matching FFmpeg

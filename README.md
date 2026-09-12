@@ -11,7 +11,7 @@ re-running detection on every single frame.
 
 ## Setup
 
-Requires Python 3, `gcc`, and `curl` (the last two only for the one-time
+Requires Python 3.12, `gcc`, and `curl` (the last two only for the one-time
 native build below).
 
 Install the Python dependencies:
@@ -19,6 +19,7 @@ Install the Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+If your server does not have GPU installed, change "inference==1.3.8" to "inference-core==1.3.8" in requirements.txt.
 
 Build the native extension (only needed once per machine, or again after
 upgrading the `av` package - `native/build.sh` downloads matching FFmpeg

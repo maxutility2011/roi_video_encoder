@@ -4,6 +4,8 @@ import sys
 import time
 from fractions import Fraction
 
+print("roi_encoder: GitHub push connectivity test")
+
 import av
 import cv2
 import numpy as np

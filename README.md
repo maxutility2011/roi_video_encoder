@@ -4,6 +4,11 @@ Re-encodes a video, giving extra bits (lower QP) to a detected region of
 interest (e.g. a person) via a per-frame ROI attached directly to each
 frame before `libx264` encoding.
 
+To keep detection cost down, the ROI detector(s) only run on I-frames; on
+the P/B-frames in between, boxes are carried forward using the motion
+vectors the decoder already computes (via `av`'s `export_mvs`), rather than
+re-running detection on every single frame.
+
 ## Setup
 
 Requires Python 3, `gcc`, and `curl` (the last two only for the one-time

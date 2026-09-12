@@ -7,6 +7,9 @@ from fractions import Fraction
 import av
 import cv2
 import numpy as np
+from av.codec.context import Flags2
+from av.sidedata.sidedata import Type as SideDataType
+from av.video.frame import PictureType
 from inference.models.utils import get_roboflow_model
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "native"))
@@ -194,6 +197,51 @@ def get_box_face(frame):
 
 
 # ---------------------------------------------------------------------------
+# Compressed-domain box propagation: rather than running the (expensive)
+# detectors on every frame, we only detect on I-frames and carry the boxes
+# forward on P/B-frames using the motion vectors FFmpeg's decoder already
+# computed during motion compensation - no extra decode cost, no detector
+# call. This trades a bit of tracking accuracy (translate-only, no
+# scaling/rotation, and a same-frame average when a box straddles several
+# motion vectors moving differently) for skipping the detector on most
+# frames.
+# ---------------------------------------------------------------------------
+def propagate_boxes(boxes, motion_vectors, frame_width, frame_height):
+    """Shift each box in `boxes` using nearby motion vectors from the frame
+    that followed it, instead of re-running detection on that frame.
+
+    Each AVMotionVector records a block move from (src_x, src_y) in the
+    reference frame to (dst_x, dst_y) in this frame. For a box positioned in
+    the reference frame's coordinates, we average the displacement
+    (dst - src) of every motion vector whose source block center falls
+    inside that box, then translate the box by that average. A box with no
+    motion vectors landing inside it (e.g. an all-intra region, or no motion
+    vector data at all) is passed through unchanged, i.e. assumed static.
+    """
+    if not boxes or motion_vectors is None or len(motion_vectors) == 0:
+        return boxes
+
+    mv = motion_vectors.to_ndarray()
+    src_x, src_y = mv["src_x"], mv["src_y"]
+    disp_x = mv["dst_x"].astype(np.int32) - src_x
+    disp_y = mv["dst_y"].astype(np.int32) - src_y
+
+    new_boxes = []
+    for x, y, w, h in boxes:
+        mask = (src_x >= x) & (src_x < x + w) & (src_y >= y) & (src_y < y + h)
+        if np.any(mask):
+            x = x + int(round(float(disp_x[mask].mean())))
+            y = y + int(round(float(disp_y[mask].mean())))
+            x = max(0, min(x, frame_width - 1))
+            y = max(0, min(y, frame_height - 1))
+            w = max(0, min(w, frame_width - x))
+            h = max(0, min(h, frame_height - y))
+        if w > 0 and h > 0:
+            new_boxes.append((x, y, w, h))
+    return new_boxes
+
+
+# ---------------------------------------------------------------------------
 # Driver: single-pass PyAV decode -> detect -> attach ROI side data -> encode
 # ---------------------------------------------------------------------------
 # This bypasses ffmpeg's CLI/filter graph entirely. It exists because
@@ -278,6 +326,10 @@ def main():
 
     in_container = av.open(args.video)
     in_stream = in_container.streams.video[0]
+    # Ask the decoder to export the motion vectors it already computes during
+    # motion compensation, so P/B-frames can reuse them for box propagation
+    # instead of paying for a detector call on every single frame.
+    in_stream.codec_context.flags2 |= Flags2.export_mvs
     total_frames = in_stream.frames  # container metadata; can be 0/unreliable
     print(
         f"Input: {args.video} ({in_stream.width}x{in_stream.height} "
@@ -304,7 +356,13 @@ def main():
     # the calls that do that work.
     decode_time = 0.0
     detect_time = 0.0
+    propagate_time = 0.0
     encode_time = 0.0
+    i_frame_count = 0
+
+    # Boxes carried over from the last I-frame, translated frame-by-frame via
+    # motion vectors on the P/B-frames in between.
+    tracked_boxes = []
 
     frame_iter = in_container.decode(in_stream)
     while True:
@@ -315,16 +373,25 @@ def main():
             break
         decode_time += time.perf_counter() - t0
 
-        t0 = time.perf_counter()
-        # Detect on an RGB view of the frame - this doesn't touch frame.ptr,
-        # so it's independent of whatever reformatting happens below.
-        rgb = frame.to_ndarray(format="rgb24")
-        boxes = []
-        if coco_words:
-            boxes += get_boxes(rgb, roi_words=coco_words, confidence=args.conf)
-        if want_text:
-            boxes += get_text_boxes(rgb, confidence=args.conf)
-        detect_time += time.perf_counter() - t0
+        if frame.pict_type == PictureType.I:
+            i_frame_count += 1
+            t0 = time.perf_counter()
+            # Detect on an RGB view of the frame - this doesn't touch
+            # frame.ptr, so it's independent of whatever reformatting
+            # happens below.
+            rgb = frame.to_ndarray(format="rgb24")
+            boxes = []
+            if coco_words:
+                boxes += get_boxes(rgb, roi_words=coco_words, confidence=args.conf)
+            if want_text:
+                boxes += get_text_boxes(rgb, confidence=args.conf)
+            detect_time += time.perf_counter() - t0
+        else:
+            t0 = time.perf_counter()
+            mvs = frame.side_data.get(SideDataType.MOTION_VECTORS)
+            boxes = propagate_boxes(tracked_boxes, mvs, frame.width, frame.height)
+            propagate_time += time.perf_counter() - t0
+        tracked_boxes = boxes
 
         t0 = time.perf_counter()
         # Reformat to the encoder's pixel format BEFORE attaching ROI side
@@ -363,12 +430,17 @@ def main():
     out_container.close()
     in_container.close()
 
-    total_time = decode_time + detect_time + encode_time
+    total_time = decode_time + detect_time + propagate_time + encode_time
     print(f"\nDone: {frame_idx} frame(s) processed -> {args.output}")
+    print(
+        f"Detected on {i_frame_count} I-frame(s), propagated boxes via "
+        f"motion vectors on the other {frame_idx - i_frame_count} frame(s)."
+    )
     print(
         f"Timing (model loading excluded): "
         f"decode {decode_time:.2f}s, detect {detect_time:.2f}s, "
-        f"encode {encode_time:.2f}s, total {total_time:.2f}s"
+        f"propagate {propagate_time:.2f}s, encode {encode_time:.2f}s, "
+        f"total {total_time:.2f}s"
         + (f" ({frame_idx / total_time:.1f} fps)" if total_time > 0 else "")
     )
 

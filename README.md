@@ -6,7 +6,7 @@ frame before `libx264` encoding.
 
 ## Setup
 
-Requires Python 3.12, FFmpeg7, `gcc`, and `curl` (the last two only for the one-time
+Requires Python 3.12, `gcc`, and `curl` (the last two only for the one-time
 native build below).
 
 Install the Python dependencies:

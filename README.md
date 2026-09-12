@@ -4,10 +4,15 @@ Re-encodes a video, giving extra bits (lower QP) to a detected region of
 interest (e.g. a person) via a per-frame ROI attached directly to each
 frame before `libx264` encoding.
 
-To keep detection cost down, the ROI detector(s) only run on I-frames; on
-the P/B-frames in between, boxes are carried forward using the motion
-vectors the decoder already computes (via `av`'s `export_mvs`), rather than
-re-running detection on every single frame.
+Two ROI detection modes are available via `--roi-mode`:
+
+- **`pixel`** (default) - runs the ROI detector(s) on every decoded frame.
+  Slower, but with no tracking drift between detections.
+- **`compressed`** - only detects on I-frames; boxes are carried forward on
+  the P/B-frames in between using the motion vectors the decoder already
+  computes (via `av`'s `export_mvs`), instead of re-running detection on
+  every single frame. Much faster, at the cost of translate-only tracking
+  accuracy between I-frames.
 
 ## Setup
 
@@ -54,6 +59,9 @@ python3 roi_encoder.py <input_video> -o <output_video> --roi person --conf 0.4 -
   in the same frame, each with the same `--qoffset` - not just the single
   largest match.
 - `--conf` - detector confidence threshold (default: `0.4`).
+- `--roi-mode` - `pixel` (default) detects on every frame; `compressed`
+  detects only on I-frames and propagates boxes across the following
+  P/B-frames via motion vectors, trading tracking accuracy for speed.
 - `--crf` - libx264 Constant Rate Factor for the overall encode; lower is
   higher quality/bitrate (default: `43`).
 - `--qoffset` - QP offset applied inside the ROI, e.g. `-0.5` or `-1/2`;

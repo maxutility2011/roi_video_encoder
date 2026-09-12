@@ -197,14 +197,18 @@ def get_box_face(frame):
 
 
 # ---------------------------------------------------------------------------
-# Compressed-domain box propagation: rather than running the (expensive)
-# detectors on every frame, we only detect on I-frames and carry the boxes
-# forward on P/B-frames using the motion vectors FFmpeg's decoder already
-# computed during motion compensation - no extra decode cost, no detector
-# call. This trades a bit of tracking accuracy (translate-only, no
-# scaling/rotation, and a same-frame average when a box straddles several
-# motion vectors moving differently) for skipping the detector on most
-# frames.
+# Compressed-domain box propagation (--roi-mode compressed): rather than
+# running the (expensive) detectors on every frame, we only detect on
+# I-frames and carry the boxes forward on P/B-frames using the motion
+# vectors FFmpeg's decoder already computed during motion compensation - no
+# extra decode cost, no detector call. This trades a bit of tracking
+# accuracy (translate-only, no scaling/rotation, and a same-frame average
+# when a box straddles several motion vectors moving differently) for
+# skipping the detector on most frames.
+#
+# This is opt-in. The default (--roi-mode pixel) runs the detector on every
+# decoded frame - slower, but with no propagation drift and no dependency on
+# the motion vectors a given encode happens to have produced.
 # ---------------------------------------------------------------------------
 def propagate_boxes(boxes, motion_vectors, frame_width, frame_height):
     """Shift each box in `boxes` using nearby motion vectors from the frame
@@ -279,6 +283,18 @@ def parse_args() -> argparse.Namespace:
         help="Confidence threshold for the ROI detector (default: %(default)s)",
     )
     parser.add_argument(
+        "--roi-mode", choices=["pixel", "compressed"], default="pixel",
+        help=(
+            "'pixel' (default) runs the ROI detector(s) on every decoded "
+            "frame. 'compressed' runs them only on I-frames and propagates "
+            "each box across the following P/B-frames using the motion "
+            "vectors FFmpeg's decoder already computed for motion "
+            "compensation, instead of paying for a detector call on every "
+            "frame - faster, at the cost of translate-only tracking "
+            "accuracy between I-frames. (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--crf", type=int, default=DEFAULT_CRF,
         help=(
             "libx264 Constant Rate Factor for the overall encode - lower is "
@@ -310,6 +326,7 @@ def main():
     want_text = any(w.lower() == TEXT_ROI_WORD for w in roi_words)
 
     qoffset = Fraction(args.qoffset).limit_denominator(1000)
+    compressed_domain = args.roi_mode == "compressed"
 
     # Load whatever detector(s) --roi actually needs, eagerly and with their
     # own status lines - on a first run the YOLO model download can take a
@@ -326,10 +343,11 @@ def main():
 
     in_container = av.open(args.video)
     in_stream = in_container.streams.video[0]
-    # Ask the decoder to export the motion vectors it already computes during
-    # motion compensation, so P/B-frames can reuse them for box propagation
-    # instead of paying for a detector call on every single frame.
-    in_stream.codec_context.flags2 |= Flags2.export_mvs
+    if compressed_domain:
+        # Ask the decoder to export the motion vectors it already computes
+        # during motion compensation, so P/B-frames can reuse them for box
+        # propagation instead of paying for a detector call on every frame.
+        in_stream.codec_context.flags2 |= Flags2.export_mvs
     total_frames = in_stream.frames  # container metadata; can be 0/unreliable
     print(
         f"Input: {args.video} ({in_stream.width}x{in_stream.height} "
@@ -373,8 +391,11 @@ def main():
             break
         decode_time += time.perf_counter() - t0
 
-        if frame.pict_type == PictureType.I:
-            i_frame_count += 1
+        # Pixel mode detects on every frame; compressed mode only on
+        # I-frames, propagating boxes across the P/B-frames in between.
+        if not compressed_domain or frame.pict_type == PictureType.I:
+            if compressed_domain:
+                i_frame_count += 1
             t0 = time.perf_counter()
             # Detect on an RGB view of the frame - this doesn't touch
             # frame.ptr, so it's independent of whatever reformatting
@@ -432,15 +453,19 @@ def main():
 
     total_time = decode_time + detect_time + propagate_time + encode_time
     print(f"\nDone: {frame_idx} frame(s) processed -> {args.output}")
-    print(
-        f"Detected on {i_frame_count} I-frame(s), propagated boxes via "
-        f"motion vectors on the other {frame_idx - i_frame_count} frame(s)."
-    )
+    if compressed_domain:
+        print(
+            f"Compressed-domain mode: detected on {i_frame_count} I-frame(s), "
+            f"propagated boxes via motion vectors on the other "
+            f"{frame_idx - i_frame_count} frame(s)."
+        )
+    else:
+        print(f"Pixel mode: detected on all {frame_idx} frame(s).")
     print(
         f"Timing (model loading excluded): "
         f"decode {decode_time:.2f}s, detect {detect_time:.2f}s, "
-        f"propagate {propagate_time:.2f}s, encode {encode_time:.2f}s, "
-        f"total {total_time:.2f}s"
+        + (f"propagate {propagate_time:.2f}s, " if compressed_domain else "")
+        + f"encode {encode_time:.2f}s, total {total_time:.2f}s"
         + (f" ({frame_idx / total_time:.1f} fps)" if total_time > 0 else "")
     )
 

@@ -59,11 +59,11 @@ python3 roi_encoder.py <input_video> -o <output_video> --roi person --conf 0.4 -
   in the same frame, each with the same `--qoffset` - not just the single
   largest match.
 - `--conf` - detector confidence threshold (default: `0.4`).
-- `--roi-mode` - `pixel` (default) detects on every frame; `compressed`
+- `--roi-mode` - `pixel` detects on every frame; `compressed` (default)
   detects only on I-frames and propagates boxes across the following
   P/B-frames via motion vectors, trading tracking accuracy for speed.
 - `--crf` - libx264 Constant Rate Factor for the overall encode; lower is
-  higher quality/bitrate (default: `43`).
+  higher quality/bitrate (default: `40`).
 - `--qoffset` - QP offset applied inside the ROI, e.g. `-0.5` or `-1/2`;
   negative values improve quality inside the ROI. Use `--qoffset=<value>`
   (with `=`) since a leading `-` is otherwise misread as another flag.

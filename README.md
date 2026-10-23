@@ -6,9 +6,9 @@ frame before `libx264` encoding.
 
 Two ROI detection modes are available via `--roi-mode`:
 
-- **`pixel`** (default) - runs the ROI detector(s) on every decoded frame.
+- **`pixel`** - runs the ROI detector(s) on every decoded frame.
   Slower, but with no tracking drift between detections.
-- **`compressed`** - only detects on I-frames; boxes are carried forward on
+- **`compressed`** (default) - only detects on I-frames; boxes are carried forward on
   the P/B-frames in between using the motion vectors the decoder already
   computes (via `av`'s `export_mvs`), instead of re-running detection on
   every single frame. Much faster, at the cost of translate-only tracking

@@ -283,7 +283,7 @@ def parse_args() -> argparse.Namespace:
         help="Confidence threshold for the ROI detector (default: %(default)s)",
     )
     parser.add_argument(
-        "--roi-mode", choices=["pixel", "compressed"], default="pixel",
+        "--roi-mode", choices=["pixel", "compressed"], default="compressed",
         help=(
             "'pixel' (default) runs the ROI detector(s) on every decoded "
             "frame. 'compressed' runs them only on I-frames and propagates "

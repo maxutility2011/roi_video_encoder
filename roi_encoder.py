@@ -32,7 +32,7 @@ except ImportError as e:
 MODEL_ID = "yolo26n-640"
 DEFAULT_ROI_WORDS = ["person"]
 DEFAULT_CONFIDENCE = 0.4
-DEFAULT_CRF = 43
+DEFAULT_CRF = 40
 DEFAULT_QOFFSET = "-0.5"
 
 _model = None

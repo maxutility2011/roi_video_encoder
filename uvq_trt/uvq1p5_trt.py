@@ -31,6 +31,10 @@ PATCH_HEIGHT = 360
 PATCH_WIDTH = 640
 NUM_PATCHES_Y = VIDEO_HEIGHT // PATCH_HEIGHT
 NUM_PATCHES_X = VIDEO_WIDTH // PATCH_WIDTH
+FEATURE_CHANNELS = 128
+CONTENT_FEATURE_SIZE = 8  # ContentNet: 256x256 input / 32
+PATCH_FEATURE_SIZE = 8  # DistortionNet: (12x20 after /32) max-pooled by (5, 13)
+AGGREGATION_SIZE = 4  # AggregationNet resizes both feature maps to 4x4
 
 INPUT_NAME = "frames"
 OUTPUT_NAME = "scores"
@@ -73,6 +77,11 @@ class UVQ1p5Fused(nn.Module):
         self.content = uvq1p5_model.content_net.model
         self.distortion = uvq1p5_model.distortion_net.model
         self.aggregation = uvq1p5_model.aggregation_net.model
+        # AggregationNet's AdaptiveAvgPool2d((4, 4)) "resizer" is shared by the
+        # 8x8 content and 24x24 distortion maps. The ONNX exporter can't size
+        # it (spatial dims get lost behind the asymmetric same-padding), so
+        # the equivalent fixed average pools are applied in forward() instead.
+        self.aggregation.resizer = nn.Identity()
 
     def forward(self, frames):
         x = frames.permute(0, 3, 1, 2).to(torch.float32)
@@ -87,11 +96,13 @@ class UVQ1p5Fused(nn.Module):
         patches = patches.permute(0, 2, 4, 1, 3, 5)
         patches = patches.reshape(-1, VIDEO_CHANNELS, PATCH_HEIGHT, PATCH_WIDTH)
         patch_features = self.distortion.avgpool[0](self.distortion.features(patches))
-        c, fh, fw = patch_features.shape[1:]
+        c, fh, fw = FEATURE_CHANNELS, PATCH_FEATURE_SIZE, PATCH_FEATURE_SIZE
         distortion = patch_features.reshape(-1, NUM_PATCHES_Y, NUM_PATCHES_X, c, fh, fw)
         distortion = distortion.permute(0, 3, 1, 4, 2, 5)
         distortion = distortion.reshape(-1, c, NUM_PATCHES_Y * fh, NUM_PATCHES_X * fw)
 
+        content = F.avg_pool2d(content, CONTENT_FEATURE_SIZE // AGGREGATION_SIZE)
+        distortion = F.avg_pool2d(distortion, NUM_PATCHES_Y * PATCH_FEATURE_SIZE // AGGREGATION_SIZE)
         return self.aggregation({"content": content, "distortion": distortion})
 
 
@@ -197,7 +208,8 @@ def iter_uint8_batches(
                 to_emit = min(decoded, expected_frames - emitted_frames)
                 if to_emit <= 0:
                     continue
-                frames = np.frombuffer(rgb, dtype=np.uint8, count=to_emit * frame_size)
+                # bytearray: torch.from_numpy() needs a writable buffer.
+                frames = np.frombuffer(bytearray(rgb), dtype=np.uint8, count=to_emit * frame_size)
                 emitted_frames += to_emit
                 yield frames.reshape(to_emit, VIDEO_HEIGHT, VIDEO_WIDTH, VIDEO_CHANNELS), to_emit
             completed_read = True

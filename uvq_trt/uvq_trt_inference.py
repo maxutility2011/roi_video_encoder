@@ -108,7 +108,7 @@ def score_video(engine, path, args, transpose, reference=None):
     predictions, reference_predictions = [], []
     with torch.inference_mode():
         for frames, _ in prefetch(batches):
-            gpu_frames = torch.from_numpy(frames).to("cuda")
+            gpu_frames = torch.from_numpy(frames).to(engine.device)
             predictions.append(engine(gpu_frames))
             if reference is not None:
                 video = gpu_frames.permute(0, 3, 1, 2).float() * (2.0 / 255.0) - 1.0

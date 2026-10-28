@@ -73,3 +73,10 @@ Example:
 ```bash
 python3 roi_encoder.py cooking.mp4 -o out.mp4 --roi person --conf 0.4 --crf 40 --qoffset=-0.5
 ```
+
+## Measuring quality with UVQ on TensorRT
+
+`uvq_trt/` exports Google's [UVQ 1.5](https://github.com/google/uvq)
+no-reference video quality model to a single TensorRT engine and scores
+videos with it (e.g. the output of `roi_encoder.py`) much faster than the
+PyTorch reference. See [uvq_trt/README.md](uvq_trt/README.md).

@@ -1,0 +1,6 @@
+torch>=2.5
+torchvision
+numpy
+onnx
+onnxruntime
+# tensorrt>=8.6 (needed for build_engine.py / uvq_trt_inference.py, GPU machines only)

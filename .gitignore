@@ -4,3 +4,6 @@ __pycache__/
 native/.build/
 native/*.so
 native/*.c
+uvq_trt/uvq/
+*.onnx
+*.engine

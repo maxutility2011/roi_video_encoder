@@ -1,16 +1,17 @@
-"""UVQ 1.5 inference with a TensorRT engine.
+"""UVQ 1.5 inference with a TensorRT engine, or ONNX Runtime on the CPU.
 
-Drop-in replacement for `uvq_inference.py --model_version 1.5 --device cuda`
-from google/uvq: same frame sampling, same scores (up to FP16 rounding when
-the engine was built with --fp16) and the same output format, but the three
-UVQ networks run as one TensorRT engine and FFmpeg decoding overlaps with
-inference.
+Drop-in replacement for google/uvq's `uvq_inference.py --model_version 1.5`:
+same frame sampling, same scores (up to FP16 rounding when the engine was
+built with --fp16) and the same output format, but the three UVQ networks
+run as one TensorRT engine (--engine) and FFmpeg decoding overlaps with
+inference. --onnx runs the same exported graph with ONNX Runtime on the
+CPU instead, e.g. to check the conversion on a machine without a GPU.
 
 Examples:
     python3 uvq_trt/uvq_trt_inference.py video.mp4 --engine uvq_trt/uvq1p5_fp16.engine
     python3 uvq_trt/uvq_trt_inference.py video.mp4 --engine uvq_trt/uvq1p5_fp16.engine --output_all_stats
     python3 uvq_trt/uvq_trt_inference.py videos.txt --engine uvq_trt/uvq1p5_fp16.engine --output scores.txt
-"""
+    python3 uvq_trt/uvq_trt_inference.py video.mp4 --onnx uvq_trt/uvq1p5.onnx --compare_pytorch"""
 
 import argparse
 import json
@@ -30,18 +31,26 @@ import uvq1p5_trt  # noqa: E402
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("input", help="A video file, or a .txt file with one video path per line")
-    parser.add_argument("--engine", required=True, help="Engine built by build_engine.py")
+    backend = parser.add_mutually_exclusive_group(required=True)
+    backend.add_argument("--engine", help="TensorRT engine built by build_engine.py (NVIDIA GPU)")
+    backend.add_argument("--onnx", help="ONNX file from export_onnx.py, run with ONNX Runtime on the CPU")
     parser.add_argument("--uvq_dir", default=uvq1p5_trt.DEFAULT_UVQ_DIR, help="Path to a google/uvq checkout")
     parser.add_argument("--output", default="", help="JSON output (single video) or CSV lines (.txt input)")
     parser.add_argument("--transpose", action="store_true", help="Transpose the video before processing")
     parser.add_argument("--fps", type=int, default=1, help="Frames per second to sample; -1 for all frames")
     parser.add_argument(
-        "--batch_size", type=int, default=None, help="Frames decoded per batch (default: the engine's max batch)"
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Frames decoded per batch (default: the engine's max batch, or 1 with --onnx)",
     )
+    parser.add_argument("--threads", type=int, default=None, help="CPU threads for --onnx (default: all cores)")
     parser.add_argument("--hwaccel", default=None, help="FFmpeg -hwaccel for decoding, e.g. cuda")
     parser.add_argument("--output_all_stats", action="store_true", help="Print all stats in JSON format")
     parser.add_argument(
-        "--compare_pytorch", action="store_true", help="Also run the original PyTorch UVQ on CUDA and report the diff"
+        "--compare_pytorch",
+        action="store_true",
+        help="Also run the original PyTorch UVQ (on the same device) and report the diff",
     )
     parser.add_argument("--ffmpeg_path", default="ffmpeg")
     parser.add_argument("--ffprobe_path", default="ffprobe")
@@ -108,10 +117,10 @@ def score_video(engine, path, args, transpose, reference=None):
     predictions, reference_predictions = [], []
     with torch.inference_mode():
         for frames, _ in prefetch(batches):
-            gpu_frames = torch.from_numpy(frames).to(engine.device)
-            predictions.append(engine(gpu_frames))
+            frames = torch.from_numpy(frames).to(engine.device)
+            predictions.append(engine(frames))
             if reference is not None:
-                video = gpu_frames.permute(0, 3, 1, 2).float() * (2.0 / 255.0) - 1.0
+                video = frames.permute(0, 3, 1, 2).float() * (2.0 / 255.0) - 1.0
                 reference_predictions.append(reference.uvq1p5_core(video.unsqueeze(1)))
 
     prediction = torch.cat(predictions)
@@ -141,16 +150,19 @@ def is_portrait(path, ffprobe_path):
 
 def main():
     args = parse_args()
-    if not torch.cuda.is_available():
-        raise SystemExit("TensorRT inference needs a CUDA GPU")
     uvq1p5_trt.add_uvq_to_path(args.uvq_dir)
 
-    engine = uvq1p5_trt.TRTEngine(args.engine)
+    if args.onnx:
+        engine = uvq1p5_trt.ORTEngine(args.onnx, args.threads)
+    else:
+        if not torch.cuda.is_available():
+            raise SystemExit("TensorRT inference needs a CUDA GPU (use --onnx to run on the CPU)")
+        engine = uvq1p5_trt.TRTEngine(args.engine)
     if args.batch_size is None:
-        args.batch_size = engine.max_batch
+        args.batch_size = engine.default_batch_size
     if args.batch_size < 1:
         raise SystemExit("--batch_size must be at least 1")
-    reference = uvq1p5_trt.load_uvq1p5(args.uvq_dir).cuda() if args.compare_pytorch else None
+    reference = uvq1p5_trt.load_uvq1p5(args.uvq_dir).to(engine.device) if args.compare_pytorch else None
 
     if args.input.endswith(".txt"):
         if not args.output:

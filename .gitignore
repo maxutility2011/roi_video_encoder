@@ -7,3 +7,4 @@ native/*.c
 uvq_trt/uvq/
 *.onnx
 *.engine
+.venv/

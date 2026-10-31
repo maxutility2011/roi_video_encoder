@@ -236,6 +236,30 @@ def iter_uint8_batches(
 
 
 # ---------------------------------------------------------------------------
+# ONNX Runtime on CPU: runs the same exported graph without a GPU, to check the
+# conversion (or score videos) on machines without TensorRT.
+# ---------------------------------------------------------------------------
+class ORTEngine:
+    """Runs the exported UVQ 1.5 ONNX graph with ONNX Runtime on the CPU."""
+
+    device = torch.device("cpu")
+    default_batch_size = 1  # same as UVQ's CPU default
+
+    def __init__(self, onnx_path, threads=None):
+        import onnxruntime as ort
+
+        options = ort.SessionOptions()
+        if threads:
+            options.intra_op_num_threads = threads
+        self.session = ort.InferenceSession(onnx_path, options, providers=["CPUExecutionProvider"])
+
+    def __call__(self, frames):
+        """frames: (N, 1080, 1920, 3) uint8 CPU tensor -> (N, 1) float32 CPU tensor."""
+        scores = self.session.run([OUTPUT_NAME], {INPUT_NAME: frames.contiguous().numpy()})[0]
+        return torch.from_numpy(scores)
+
+
+# ---------------------------------------------------------------------------
 # TensorRT runtime (TensorRT >= 8.6 tensor-address API, incl. TensorRT 10).
 # ---------------------------------------------------------------------------
 class TRTEngine:
@@ -264,6 +288,7 @@ class TRTEngine:
         ).dtype
         min_shape, _, max_shape = self.engine.get_tensor_profile_shape(self.input_name, 0)
         self.min_batch, self.max_batch = int(min_shape[0]), int(max_shape[0])
+        self.default_batch_size = self.max_batch
 
     def __call__(self, frames):
         """frames: (N, 1080, 1920, 3) uint8 tensor (any device) -> (N, 1) float32 on GPU."""
